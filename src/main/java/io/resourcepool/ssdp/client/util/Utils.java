@@ -22,12 +22,12 @@ public abstract class Utils {
    */
   public static List<NetworkInterface> getMulticastInterfaces() throws SocketException {
     List<NetworkInterface> viableInterfaces = new ArrayList<NetworkInterface>();
-    Enumeration e = NetworkInterface.getNetworkInterfaces();
+    Enumeration<NetworkInterface> e = NetworkInterface.getNetworkInterfaces();
     while (e.hasMoreElements()) {
-      NetworkInterface n = (NetworkInterface) e.nextElement();
-      Enumeration ee = n.getInetAddresses();
+      NetworkInterface n = e.nextElement();
+      Enumeration<InetAddress> ee = n.getInetAddresses();
       while (ee.hasMoreElements()) {
-        InetAddress i = (InetAddress) ee.nextElement();
+        InetAddress i = ee.nextElement();
         if (i.isSiteLocalAddress() && !i.isAnyLocalAddress() && !i.isLinkLocalAddress()
             && !i.isLoopbackAddress() && !i.isMulticastAddress()) {
           viableInterfaces.add(NetworkInterface.getByName(n.getName()));

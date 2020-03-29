@@ -1,23 +1,11 @@
 package io.resourcepool.ssdp.client.impl;
 
-import io.resourcepool.ssdp.client.SsdpClient;
-import io.resourcepool.ssdp.client.SsdpParams;
-import io.resourcepool.ssdp.client.util.Utils;
-import io.resourcepool.ssdp.client.request.SsdpDiscovery;
-import io.resourcepool.ssdp.client.response.SsdpResponse;
-import io.resourcepool.ssdp.exception.NoSerialNumberException;
-import io.resourcepool.ssdp.model.DiscoveryListener;
-import io.resourcepool.ssdp.model.DiscoveryRequest;
-import io.resourcepool.ssdp.model.SsdpService;
-import io.resourcepool.ssdp.model.SsdpServiceAnnouncement;
-import io.resourcepool.ssdp.client.parser.ResponseParser;
-
 import java.io.IOException;
 import java.net.DatagramPacket;
 import java.net.InetAddress;
+import java.net.InetSocketAddress;
 import java.net.MulticastSocket;
 import java.net.NetworkInterface;
-import java.net.InetSocketAddress;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -26,6 +14,18 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+
+import io.resourcepool.ssdp.client.SsdpClient;
+import io.resourcepool.ssdp.client.SsdpParams;
+import io.resourcepool.ssdp.client.parser.ResponseParser;
+import io.resourcepool.ssdp.client.request.SsdpDiscovery;
+import io.resourcepool.ssdp.client.response.SsdpResponse;
+import io.resourcepool.ssdp.client.util.Utils;
+import io.resourcepool.ssdp.exception.NoSerialNumberException;
+import io.resourcepool.ssdp.model.DiscoveryListener;
+import io.resourcepool.ssdp.model.DiscoveryRequest;
+import io.resourcepool.ssdp.model.SsdpService;
+import io.resourcepool.ssdp.model.SsdpServiceAnnouncement;
 
 /**
  * The SsdpClient handles all multicast SSDP content.
@@ -59,13 +59,14 @@ public class SsdpClientImpl extends SsdpClient {
   }
 
   private ScheduledExecutorService sendExecutor = Executors.newScheduledThreadPool(1);
-  private ExecutorService receiveExecutor = Executors.newSingleThreadExecutor();
+  private ExecutorService receiveExecutor = Executors.newFixedThreadPool(2);
 
   // Stateful attributes
   private List<DiscoveryRequest> requests;
   private DiscoveryListener callback = NOOP_LISTENER;
   private State state;
   private Map<String, SsdpService> cache = new ConcurrentHashMap<String, SsdpService>();
+  private MulticastSocket serverSocket;
   private MulticastSocket clientSocket;
   private List<NetworkInterface> interfaces;
 
@@ -111,6 +112,27 @@ public class SsdpClientImpl extends SsdpClient {
         sendDiscoveryRequest();
       }
     }, 0, req.getDiscoveryOptions().getIntervalBetweenRequests(), TimeUnit.MILLISECONDS);
+
+    // Receive all incoming datagrams and handle them on-the-fly
+    receiveExecutor.execute(new Runnable() {
+      @Override
+      public void run() {
+        try {
+          while (State.ACTIVE.equals(state)) {
+            byte[] buffer = new byte[8192];
+            DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
+            serverSocket.receive(packet);
+            handleIncomingPacket(packet);
+          }
+        } catch (IOException e) {
+          if (serverSocket.isClosed() && !State.ACTIVE.equals(state)) {
+            // This could happen when closing socket. In that case, this is not an issue.
+            return;
+          }
+          callback.onFailed(e);
+        }
+      }
+    });
 
     // Receive all incoming datagrams and handle them on-the-fly
     receiveExecutor.execute(new Runnable() {
@@ -184,6 +206,7 @@ public class SsdpClientImpl extends SsdpClient {
    */
   private void openAndBindSocket() {
     try {
+      this.serverSocket = new MulticastSocket(SsdpParams.getSsdpMulticastPort());
       this.clientSocket = new MulticastSocket();
       interfaces = Utils.getMulticastInterfaces();
       joinGroupOnAllInterfaces(SsdpParams.getSsdpMulticastAddress());
@@ -258,10 +281,10 @@ public class SsdpClientImpl extends SsdpClient {
       InetSocketAddress socketAddress = new InetSocketAddress(address, 65535); // the port number does not matter here. it is ignored
 
       for (NetworkInterface iface : interfaces) {
-        this.clientSocket.joinGroup(socketAddress, iface);
+        this.serverSocket.joinGroup(socketAddress, iface);
       }
     } else {
-      this.clientSocket.joinGroup(address);
+      this.serverSocket.joinGroup(address);
     }
   }
 
@@ -277,10 +300,10 @@ public class SsdpClientImpl extends SsdpClient {
       InetSocketAddress socketAddress = new InetSocketAddress(address, 65535); // the port number does not matter here. it is ignored
 
       for (NetworkInterface iface : interfaces) {
-        this.clientSocket.leaveGroup(socketAddress, iface);
+        this.serverSocket.leaveGroup(socketAddress, iface);
       }
     } else {
-      this.clientSocket.leaveGroup(address);
+      this.serverSocket.leaveGroup(address);
     }
   }
 
@@ -296,8 +319,10 @@ public class SsdpClientImpl extends SsdpClient {
     } catch (IOException e) {
       // Fail silently
     } finally {
+      this.serverSocket.close();
       this.clientSocket.close();
     }
+
     this.interfaces = null;
     this.state = State.IDLE;
   }
